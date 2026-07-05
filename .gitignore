@@ -1,0 +1,7 @@
+# Large files not in repo
+*.zst
+*.sqlite.bak
+camus-copy.sqlite
+camus.sqlite
+__pycache__/
+*.pyc
