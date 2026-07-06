@@ -66,96 +66,90 @@ HARD STOPS:
   hold >= 135min → EXIT (timeout)
 ```
 
-## The 4 Racing Mechanisms
+## Entry × Exit Performance (from 2,474 positions)
 
-Each mechanism uses the same signals differently, creating genuine divergence:
-
-### 1. Profit Guard
 ```
-PHASE 1 — First TP at +50% → sell 70%, keep 30% moonbag
-PHASE 2 — Runner tiers: +150% sell half, +400% sell quarter
-PHASE 3 — Bullish hold: if flow_ratio >= 0.8 AND smart >= 3, extend hold
-PHASE 4 — Flow kill: if flow_ratio < 0.3, exit remaining
-PHASE 5 — Standard trail at 10% on remaining position
-HARD — SL at -30%, timeout at 135min
-```
+                    ADAPTIVE    TRAIL     FLOW     DOUBLE_SL   SUPPRESS
+fee_graduated      +0.947      +0.832    +0.640   -0.721      -1.103
+                    36%/78%     35%/1%    33%/1%   2%/29%      2%/35%
 
-### 2. Liquidity Crash
-```
-TRACK — liquidity peak, sniper wallet count, whale wallet count
+flik_scout         +0.540      +0.216    +0.168   -4.834      -6.678
+                    44%/77%     42%/2%    42%/2%   2%/14%      2%/40%
 
-A — If liquidity drops 50% from peak → EXIT (LP drained)
-B — If sniper wallets spike by 3+ in 60s → EXIT (coordinated attack)
-C — If whale wallets drop AND sell volume 3x buy volume → EXIT (whale dump)
-
-HARD — SL at -30%, timeout at 135min
+graduated_trending +0.203      -0.427    -0.521   -17.520     -28.289
+                    44%/79%     43%/4%    42%/1%   2%/19%      6%/29%
 ```
 
-### 3. Flow Kill
-```
-TRACK — flow_ratio, total volume (buy + sell), smart_money
+**Cell format:** Total PnL / WR% / Best%
+- **Total PnL** = sum of all PnL for this combo
+- **WR%** = % of positions that closed at profit
+- **Best%** = % of time this mechanism beat all others
 
-A — If flow_ratio < 0.3 for 3 consecutive ticks → EXIT (sustained distribution)
-B — If total volume drops to 15% of peak AND flow_ratio < 0.8 → EXIT (volume death)
-C — If smart_money = 0 AND flow_ratio < 0.7 AND held > 2min → EXIT (abandoned)
-
-HARD — SL at -30%, timeout at 135min
-```
-
-### 4. Adaptive Trail
-```
-TRACK — pnl_peak, flow_ratio, hot_level
-
-BASE TRAIL from profit regime:
-  pnl_peak >= 50% → trail = 3%
-  pnl_peak >= 20% → trail = 6%
-  pnl_peak >= 5%  → trail = 10%
-  pnl_peak >= 1%  → trail = 12%
-
-ADJUST by flow:
-  flow >= 0.8 → trail *= 1.5 (buyers confirm move, let it run)
-  flow < 0.3  → trail *= 0.7 (distribution, tighten)
-
-ADJUST by volatility:
-  hot >= 80 → trail *= 0.8 (memes reverse fast)
-  hot < 30  → trail *= 1.2 (slow move needs room)
-
-EXIT if (pnl_peak - current_pnl) >= adjusted_trail
-
-HARD — SL at -30%, timeout at 135min
-```
+ADAPTIVE wins ~77-86% of the time across all routes. DOUBLE_SL and SUPPRESS destroy PnL on every route.
 
 ## Data Sources
 
-All mechanisms read from the same tick stream (`position_ticks` table):
+All signals derived from `position_ticks` table — no extra API calls:
 
 | Column | What it measures |
 |---|---|
-| `mcap` | Current market cap |
-| `pnl_percent` | PnL % from entry |
-| `drawdown_pct` | % below peak |
 | `flow_ratio` | buy_vol_5m / sell_vol_5m |
-| `buys_5m` / `sells_5m` | Buy/sell tx count (5min) |
-| `buy_vol_5m` / `sell_vol_5m` | Volume in SOL |
 | `smart_money` | Smart money wallets active |
-| `holder_count` | Current holder count |
 | `liquidity` | Pool liquidity in USD |
 | `sniper_wallets` / `whale_wallets` | Wallet type counts |
 | `hot_level` | GMGN hotness score |
-| `dev_status` | Dev activity: holding/selling/dumped |
 
-No extra API calls. Every mechanism derives from the same tick data.
-
-## Deployment
-
-Configs live in `camus_strategies` table. Each mechanism runs on every position:
+## Schema
 
 ```sql
-INSERT OR REPLACE INTO camus_strategies (id, name, enabled, allocation_pct, config_json) VALUES
-('profit_guard', 'Profit Guard', 1, 100, '{"type":"profit_guard","tp_pct":50,"tp_sell_frac":0.7,"moonbag_frac":0.3,"trail_pct":10,"sl":-30,"bullish_flow":0.8,"flow_kill":0.3,"max_hold_ms":8100000}'),
-('liquidity_crash', 'Liquidity Crash', 1, 100, '{"type":"liquidity_crash","liq_drop_pct":0.5,"sniper_spike":3,"sniper_window_ms":60000,"sl":-30,"max_hold_ms":8100000}'),
-('flow_kill', 'Flow Kill', 1, 100, '{"type":"flow_kill","flow_kill_ratio":0.3,"flow_kill_ticks":3,"vol_death_pct":0.15,"smart_exit_count":0,"smart_exit_flow":0.7,"smart_exit_delay_ms":120000,"sl":-30,"max_hold_ms":8100000}'),
-('adaptive', 'Adaptive Trail', 1, 100, '{"type":"adaptive","adaptive":true,"trail_pct":10,"flow_confirm":0.8,"flow_fear":0.3,"hot_tighten":80,"cold_loosen":30,"sl":-30,"max_hold_ms":8100000}');
+-- Strategy definitions (one per mechanism)
+CREATE TABLE camus_strategies (
+  id TEXT PRIMARY KEY,
+  name TEXT,
+  enabled INTEGER DEFAULT 1,
+  allocation_pct REAL,
+  config_json TEXT
+);
+
+-- Position slices (one per strategy per position)
+CREATE TABLE position_slices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  position_id INTEGER NOT NULL,
+  strategy_id TEXT NOT NULL,
+  size_sol REAL NOT NULL,
+  status TEXT DEFAULT 'active',
+  exit_reason TEXT,
+  pnl_sol REAL
+);
+
+-- Mechanism performance records
+CREATE TABLE exit_mechanism_tracker (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  position_id INTEGER NOT NULL,
+  entry_route TEXT,
+  mechanism TEXT NOT NULL,
+  pnl_at_fire REAL,
+  was_actual INTEGER DEFAULT 0
+);
+
+-- Entry × Exit weights (computed from exit_mechanism_tracker)
+CREATE TABLE entry_exit_weights (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_route TEXT NOT NULL,
+  exit_mechanism TEXT NOT NULL,
+  weight REAL DEFAULT 1.0,
+  total_pnl REAL DEFAULT 0,
+  n_positions INTEGER DEFAULT 0,
+  best_count INTEGER DEFAULT 0,
+  wr REAL DEFAULT 0,
+  UNIQUE(entry_route, exit_mechanism)
+);
 ```
 
-Each position creates 4 slices (one per mechanism). The first to trigger only exits its slice — the other 3 keep tracking. After all have fired or 135min timeout, the system compares which mechanism had the best PnL for that position.
+## Key Takeaways
+
+1. **ADAPTIVE trail wins 77-86%** of the time across all entry routes
+2. **Entry route matters more than exit** — fee_graduated vs graduated_trending gap is 1.4 SOL; exit tuning gives 0.12 SOL
+3. **Flow ratio is the best exit signal** — < 0.3 = emergency, > 0.8 = ride it
+4. **Liquidity >= 20K predicts 34% WR** — size up when pool is deep
+5. **Don't hard-block signals** — flik_scout becomes profitable (+0.540) with ADAPTIVE
